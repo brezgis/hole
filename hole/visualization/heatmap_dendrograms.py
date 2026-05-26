@@ -5,10 +5,13 @@ import matplotlib.pyplot as plt
 import networkx as nx
 import numpy as np
 from loguru import logger
+from matplotlib.patches import Patch, Rectangle
 from scipy.cluster.hierarchy import dendrogram
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import reverse_cuthill_mckee
 from sklearn.metrics import pairwise_distances
+
+from .scatter_hull import get_label_color
 
 
 class UnionFind:
@@ -315,23 +318,120 @@ class PersistenceDendrogram:
         return np.array(linkage) if linkage else np.array([[0, 1, 1.0, 2]])
 
     def plot_dendrogram(
-        self, labels=None, title="Persistence Dendrogram", figsize=(12, 8)
+        self,
+        labels=None,
+        class_labels=None,
+        class_colors=None,
+        class_names=None,
+        show_legend=True,
+        title="Persistence Dendrogram",
+        figsize=(12, 8),
     ):
-        """Plot the dendrogram (simple version without heatmap)."""
+        """Plot the dendrogram (simple version without heatmap).
+
+        When ``class_labels`` is provided, a strip of colored blocks (one per
+        leaf, in dendrogram order) replaces the rotated text labels — useful
+        when there are too many points for text to be legible.
+
+        Parameters
+        ----------
+        labels : list, optional
+            Per-point text labels. Used only when ``class_labels`` is None.
+        class_labels : array-like, optional
+            Per-point class ids (original index order). If provided, draws a
+            color band beneath the dendrogram instead of text labels.
+        class_colors : list or dict, optional
+            Override colors. List indexed by class id (e.g. ``['blue', 'red']``)
+            or dict (e.g. ``{0: 'blue', 1: 'red'}``). Falls back to
+            ``get_label_color`` if omitted.
+        class_names : list or dict, optional
+            Display names for the legend. Falls back to ``"class {id}"``.
+        show_legend : bool, default True
+            Draw a legend mapping color → class name.
+        """
         if self.linkage_matrix is None:
             self.build_linkage_matrix_from_persistence()
 
-        plt.figure(figsize=figsize)
+        if class_labels is None:
+            plt.figure(figsize=figsize)
+            dendrogram_result = dendrogram(
+                self.linkage_matrix,
+                labels=labels,
+                leaf_rotation=90,
+                leaf_font_size=10,
+            )
+            plt.title(title)
+            plt.xlabel("Data Points")
+            plt.ylabel("Distance (Death Threshold)")
+            plt.tight_layout()
+            return dendrogram_result
 
-        # Create dendrogram
+        class_labels = np.asarray(class_labels)
+        if len(class_labels) != self.n_points:
+            raise ValueError(
+                f"class_labels length ({len(class_labels)}) does not match "
+                f"number of points ({self.n_points})"
+            )
+        if labels is not None:
+            logger.warning(
+                "plot_dendrogram: `labels` is ignored when `class_labels` is provided"
+            )
+
+        unique_classes = sorted(set(class_labels.tolist()))
+        n_classes = len(unique_classes)
+        class_pos = {cid: i for i, cid in enumerate(unique_classes)}
+
+        def resolve_color(cid):
+            pos = class_pos[cid]
+            if class_colors is None:
+                return get_label_color(pos, n_classes=max(n_classes, 2))
+            if isinstance(class_colors, dict):
+                return class_colors[cid]
+            return class_colors[pos]
+
+        def resolve_name(cid):
+            if class_names is None:
+                return f"class {cid}"
+            if isinstance(class_names, dict):
+                return class_names.get(cid, f"class {cid}")
+            return class_names[class_pos[cid]]
+
+        fig = plt.figure(figsize=figsize, layout="constrained")
+        gs = fig.add_gridspec(2, 1, height_ratios=[20, 1], hspace=0.05)
+        ax_dendro = fig.add_subplot(gs[0])
+        ax_band = fig.add_subplot(gs[1])
+
         dendrogram_result = dendrogram(
-            self.linkage_matrix, labels=labels, leaf_rotation=90, leaf_font_size=10
+            self.linkage_matrix,
+            ax=ax_dendro,
+            no_labels=True,
         )
+        ax_dendro.set_title(title)
+        ax_dendro.set_ylabel("Distance (Death Threshold)")
 
-        plt.title(title)
-        plt.xlabel("Data Points")
-        plt.ylabel("Distance (Death Threshold)")
-        plt.tight_layout()
+        # scipy places leaf i at x-center 10*i + 5; rectangle spans [10*i, 10*(i+1)]
+        leaves = dendrogram_result["leaves"]
+        for i, leaf_idx in enumerate(leaves):
+            cid = class_labels[leaf_idx]
+            ax_band.add_patch(
+                Rectangle(
+                    (10 * i, 0), 10, 1,
+                    facecolor=resolve_color(cid),
+                    edgecolor="none",
+                )
+            )
+        ax_band.set_xlim(0, 10 * len(leaves))
+        ax_band.set_ylim(0, 1)
+        ax_band.set_xticks([])
+        ax_band.set_yticks([])
+        ax_band.set_xlabel("Data Points")
+
+        if show_legend:
+            handles = [
+                Patch(facecolor=resolve_color(cid), label=resolve_name(cid))
+                for cid in unique_classes
+            ]
+            ax_dendro.legend(handles=handles, loc="upper right", frameon=True)
 
         return dendrogram_result
 
