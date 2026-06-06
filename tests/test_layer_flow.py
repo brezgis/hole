@@ -223,6 +223,24 @@ def test_dendrogram_band_colors_match_raw_label():
         assert colors[leaf_pos] == pytest.approx(expected)
 
 
+def test_dendrogram_accepts_numpy_labels():
+    """Regression: numpy-array labels must not trip the 'ambiguous truth value'
+    error in plot_dendrogram_with_heatmap (L468) or plot_rcm_heatmap (L172)."""
+    rng = np.random.default_rng(3)
+    pd = _dendro(rng.normal(size=(12, 4)))
+    labels_np = np.arange(12)  # ndarray, both <=30 and the `or []` path
+    plt.close("all")
+    fig, _ = pd.plot_dendrogram_with_heatmap(labels=labels_np)
+    plt.close(fig)
+    fig2 = plt.figure()
+    pd.plot_rcm_heatmap(labels=labels_np, ax=fig2.add_subplot(111))
+    plt.close("all")
+    # >50 labels must also work (exercises the no_labels=True branch)
+    big = _dendro(rng.normal(size=(60, 4)))
+    fig3, _ = big.plot_dendrogram_with_heatmap(labels=np.arange(60))
+    plt.close(fig3)
+
+
 def test_dendrogram_default_off_unchanged():
     rng = np.random.default_rng(2)
     pts = rng.normal(size=(8, 3))

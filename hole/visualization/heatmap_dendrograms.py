@@ -168,8 +168,9 @@ class PersistenceDendrogram:
             reordered_dist_matrix, aspect="auto", cmap=cmap, interpolation="nearest"
         )
 
-        # Add labels if not too many
-        if labels and len(labels) <= 30:
+        # Add labels if not too many (test identity, not truthiness, so a numpy
+        # array of labels doesn't raise "ambiguous truth value")
+        if labels is not None and len(labels) <= 30:
             reordered_labels = [labels[i] for i in reorder_indices]
             ax.set_xticks(range(len(reordered_labels)))
             ax.set_yticks(range(len(reordered_labels)))
@@ -465,7 +466,7 @@ class PersistenceDendrogram:
             ax=ax_dendro,
             orientation="left",
             leaf_font_size=8,
-            no_labels=True if len(labels or []) > 50 else False,
+            no_labels=(labels is not None and len(labels) > 50),
         )
         ax_dendro.set_title("Dendrogram")
         ax_dendro.set_xlabel("Distance")
