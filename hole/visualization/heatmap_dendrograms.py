@@ -168,9 +168,11 @@ class PersistenceDendrogram:
             reordered_dist_matrix, aspect="auto", cmap=cmap, interpolation="nearest"
         )
 
-        # Add labels if not too many (test identity, not truthiness, so a numpy
-        # array of labels doesn't raise "ambiguous truth value")
-        if labels is not None and len(labels) <= 30:
+        # Add labels if some were provided and there aren't too many. Test
+        # identity + length (not truthiness) so a numpy array of labels doesn't
+        # raise "ambiguous truth value"; the `0 < len` keeps the old behavior of
+        # skipping an empty label list.
+        if labels is not None and 0 < len(labels) <= 30:
             reordered_labels = [labels[i] for i in reorder_indices]
             ax.set_xticks(range(len(reordered_labels)))
             ax.set_yticks(range(len(reordered_labels)))
