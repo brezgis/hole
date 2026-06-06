@@ -56,6 +56,11 @@ from .visualization.cluster_flow import (
     ClusterFlowAnalyzer,
     analyze_activation_flows,
 )
+from .visualization.layer_flow import (
+    LayerEvolutionAnalyzer,
+    analyze_layer_flows,
+    cluster_to_k,
+)
 from .visualization.heatmap_dendrograms import (
     PersistenceDendrogram,
     analyze_activation_persistence,
@@ -72,6 +77,7 @@ __all__ = [
     "HOLEVisualizer",
     "MSTProcessor",
     "ClusterFlowAnalyzer",
+    "LayerEvolutionAnalyzer",
     "BlobVisualizer",
     "PersistenceDendrogram",
     # Distance metrics
@@ -91,6 +97,8 @@ __all__ = [
     "compute_persistence_statistics",
     # High-level analysis drivers
     "analyze_activation_flows",
+    "analyze_layer_flows",
+    "cluster_to_k",
     "analyze_activation_persistence",
     # Logging helper
     "configure_logging",

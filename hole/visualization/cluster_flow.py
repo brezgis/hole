@@ -447,14 +447,27 @@ class ComponentEvolutionVisualizer:
         gray_second_layer=True,
         show_true_labels_text=True,
         show_filtration_text=True,
+        stage_order=None,
+        stage_labels=None,
+        x_axis_label="Cluster Evolution Stages",
     ):
         """
-        Create a 5-stage Sankey diagram:
-        Stage 1: True Labels
-        Stage 2: Initial PH clusters (many small clusters)
-        Stage 3: Clusters similar to true labels
-        Stage 4: Intermediate merging
-        Stage 5: Final single cluster
+        Create an (N+1)-stage Sankey diagram. Stage 0 is always the true
+        labels; the remaining stages are taken from the data.
+
+        Two calling conventions are supported:
+
+        * Legacy (intra-layer filtration): pass nothing extra. The stages are
+          the numeric death thresholds stored in ``components_[key]``, sorted by
+          value, and displayed as ``f"{t:.4f}"``. Requires >= 4 thresholds, as
+          before.
+        * Cross-layer evolution: pass ``stage_order`` as an explicit ordered
+          list of the string keys in ``labels_[key]`` (e.g. layer names). The
+          x-axis then represents model depth rather than filtration scale, and
+          ``stage_labels`` (optional) gives the per-stage display text.
+
+        Flows between consecutive stages are co-membership counts over the same
+        N points, so this renders splits as well as merges.
         """
         if ax is None:
             fig, ax = plt.subplots(figsize=(18, 10))
@@ -485,14 +498,28 @@ class ComponentEvolutionVisualizer:
             )
             return ax
 
-        # Get the 4 thresholds (for stages 2-5)
-        thresholds = sorted([float(t) for t in self.components_[key].keys()])
+        # Determine the ordered stages. Legacy callers pass numeric filtration
+        # thresholds (sorted by value); cross-layer callers pass an explicit
+        # stage_order of arbitrary string keys (e.g. layer names) so the x-axis
+        # represents model depth rather than filtration scale.
+        if stage_order is None:
+            stage_keys = sorted(self.components_[key].keys(), key=float)
+            stage_disp = [f"{float(k):.4f}" for k in stage_keys]
+            min_stages = 4
+        else:
+            stage_keys = [str(s) for s in stage_order]
+            stage_disp = (
+                [str(s) for s in stage_labels]
+                if stage_labels is not None
+                else [str(s) for s in stage_keys]
+            )
+            min_stages = 1
 
-        if len(thresholds) < 4:
+        if len(stage_keys) < min_stages:
             ax.text(
                 0.5,
                 0.5,
-                f"Need 4 thresholds for 5-stage visualization, got {len(thresholds)}",
+                f"Need >= {min_stages} stages, got {len(stage_keys)}",
                 ha="center",
                 va="center",
                 transform=ax.transAxes,
@@ -500,17 +527,18 @@ class ComponentEvolutionVisualizer:
             )
             return ax
 
-        # Create consistent color mapping
+        # Create consistent color mapping across all stages
         self.color_mapping = self._create_color_mapping(
-            key, thresholds, original_labels
+            key, stage_keys, original_labels
         )
 
-        # Define the 5 stages with actual threshold values
-        stage_names = ["True Labels"] + [f"{t:.4f}" for t in thresholds]
-        n_stages = 5
+        # Stage 0 is always the true labels; the rest come from the data.
+        stage_names = ["True Labels"] + stage_disp
+        n_stages = len(stage_names)
 
-        # Calculate positions for 5 stages
-        x_positions = [0.1 + i * 0.2 for i in range(n_stages)]
+        # Evenly space stages across the canvas. Reduces to the legacy
+        # 0.1, 0.3, 0.5, 0.7, 0.9 layout when n_stages == 5.
+        x_positions = list(np.linspace(0.1, 0.9, n_stages))
 
         # Track node positions for each stage
         node_positions = {}
@@ -541,15 +569,15 @@ class ComponentEvolutionVisualizer:
             }
             current_y += height
 
-        # STAGES 2-5: Process each threshold
-        for stage_idx, threshold in enumerate(thresholds):
-            actual_stage = stage_idx + 1  # Stages 1-4 (index 1-4)
-            threshold_str = str(threshold)
+        # STAGES 1..N: Process each data stage (threshold or layer)
+        for stage_idx, stage_key in enumerate(stage_keys):
+            actual_stage = stage_idx + 1
+            threshold_str = stage_key
 
             if threshold_str not in self.labels_[key]:
                 continue
 
-            logger.debug(f"Creating Stage {actual_stage + 1}: Threshold {threshold:.4f}")
+            logger.debug(f"Creating Stage {actual_stage + 1}: {stage_disp[stage_idx]}")
 
             labels_at_threshold = self.labels_[key][threshold_str]
             component_counts = Counter(labels_at_threshold)
@@ -591,15 +619,15 @@ class ComponentEvolutionVisualizer:
             if from_stage == 0:
                 labels1 = original_labels
             else:
-                threshold_idx = from_stage - 1
-                if threshold_idx < len(thresholds):
-                    labels1 = self.labels_[key][str(thresholds[threshold_idx])]
+                stage_pos = from_stage - 1
+                if stage_pos < len(stage_keys):
+                    labels1 = self.labels_[key][stage_keys[stage_pos]]
                 else:
                     continue
 
-            threshold_idx = to_stage - 1
-            if threshold_idx < len(thresholds):
-                labels2 = self.labels_[key][str(thresholds[threshold_idx])]
+            stage_pos = to_stage - 1
+            if stage_pos < len(stage_keys):
+                labels2 = self.labels_[key][stage_keys[stage_pos]]
             else:
                 continue
 
@@ -753,7 +781,7 @@ class ComponentEvolutionVisualizer:
         # Formatting
         ax.set_xlim(0, 1)
         ax.set_ylim(0, 1)
-        ax.set_xlabel("Cluster Evolution Stages", fontsize=16)  # Bigger for paper
+        ax.set_xlabel(x_axis_label, fontsize=16)  # Bigger for paper
         ax.set_ylabel("Component Size (Normalized)", fontsize=16)  # Bigger for paper
 
         if title:
@@ -787,14 +815,16 @@ class ComponentEvolutionVisualizer:
         gray_second_layer=True,
         show_true_labels_text=True,
         show_filtration_text=True,
+        stage_order=None,
+        stage_labels=None,
+        x_axis_label="Cluster Evolution Stages",
     ):
         """
-        Create a 5-stage stacked bar chart:
-        Stage 1: True labels
-        Stage 2: Initial PH clusters (many small clusters)
-        Stage 3: Clusters similar to true labels
-        Stage 4: Intermediate merging
-        Stage 5: Final single cluster
+        Create an (N+1)-stage stacked bar chart (true labels + N data stages).
+
+        Supports the same two calling conventions as :meth:`plot_sankey`:
+        legacy numeric thresholds (when ``stage_order`` is omitted) or an
+        explicit ``stage_order`` of string keys for cross-layer evolution.
         """
         if ax is None:
             fig, ax = plt.subplots(figsize=(16, 10))
@@ -825,14 +855,25 @@ class ComponentEvolutionVisualizer:
             )
             return ax
 
-        # Get the 4 thresholds (for stages 2-5)
-        thresholds = sorted([float(t) for t in self.components_[key].keys()])
+        # Determine ordered stages (see plot_sankey for the two conventions).
+        if stage_order is None:
+            stage_keys = sorted(self.components_[key].keys(), key=float)
+            stage_disp = [f"{float(k):.4f}" for k in stage_keys]
+            min_stages = 4
+        else:
+            stage_keys = [str(s) for s in stage_order]
+            stage_disp = (
+                [str(s) for s in stage_labels]
+                if stage_labels is not None
+                else [str(s) for s in stage_keys]
+            )
+            min_stages = 1
 
-        if len(thresholds) < 4:
+        if len(stage_keys) < min_stages:
             ax.text(
                 0.5,
                 0.5,
-                f"Need 4 thresholds for 5-stage visualization, got {len(thresholds)}",
+                f"Need >= {min_stages} stages, got {len(stage_keys)}",
                 ha="center",
                 va="center",
                 transform=ax.transAxes,
@@ -843,19 +884,14 @@ class ComponentEvolutionVisualizer:
         # Create consistent color mapping if not already created
         if self.color_mapping is None:
             self.color_mapping = self._create_color_mapping(
-                key, thresholds, original_labels
+                key, stage_keys, original_labels
             )
 
-        # Define the stages with actual threshold values
-        # Add small gap after true labels, then stick filtration stages together
-        stage_names = ["True Labels", ""] + [f"{t:.4f}" for t in thresholds]
-        x_positions = np.array(
-            [0, 1.5, 2.0, 3.0, 4.0, 5.0]
-        )  # Smaller gap after true labels, then consecutive
+        # Layout: true labels at 0, a small gap, then consecutive data stages.
+        # Reduces to the legacy [0, 1.5, 2, 3, 4, 5] layout for 4 stages.
+        stage_names = ["True Labels", ""] + stage_disp
+        x_positions = np.array([0, 1.5] + [2.0 + i for i in range(len(stage_keys))])
         bar_width = 1.0  # Make bars stick together by using full width
-        # n_stages = len(stage_names)
-        # Get unique true labels
-        # unique_labels = sorted(set(original_labels))
 
         # Process each stage
         stage_data = []
@@ -867,13 +903,12 @@ class ComponentEvolutionVisualizer:
         # Stage 2: Empty separator (white bar)
         stage_data.append(("", {}))
 
-        # Stages 3-6: Each threshold
-        for i, threshold in enumerate(thresholds):
-            threshold_str = str(threshold)
-            if threshold_str in self.labels_[key]:
-                labels_at_threshold = self.labels_[key][threshold_str]
+        # Stages 3..: Each data stage
+        for stage_key, disp in zip(stage_keys, stage_disp):
+            if stage_key in self.labels_[key]:
+                labels_at_threshold = self.labels_[key][stage_key]
                 component_counts = Counter(labels_at_threshold)
-                stage_data.append((f"{threshold:.4f}", component_counts))
+                stage_data.append((disp, component_counts))
 
         # Create stacked bars
         for stage_idx, (stage_name, component_counts) in enumerate(stage_data):
@@ -945,7 +980,7 @@ class ComponentEvolutionVisualizer:
                 bottom += count
 
         # Customize plot - BIGGER fonts for paper
-        ax.set_xlabel("Cluster Evolution Stages", fontsize=16)  # Bigger for paper
+        ax.set_xlabel(x_axis_label, fontsize=16)  # Bigger for paper
         ax.set_ylabel("Component Size", fontsize=16)  # Bigger for paper
         # ax.set_title(
         #     f"Stacked Bar Chart - {title if title else key}", fontsize=18, pad=20  # Bigger for paper
@@ -960,7 +995,7 @@ class ComponentEvolutionVisualizer:
         )  # Bigger for paper
 
         # Set x-axis limits to avoid any weird spacing around the invisible separator
-        ax.set_xlim(-0.5, 5.5)
+        ax.set_xlim(-0.5, float(x_positions[-1]) + 0.5)
 
         # Remove all visual elements except the bars
         ax.set_yticks([])
@@ -1015,9 +1050,16 @@ class FlowVisualizer:
         title: str = None,
         show_true_labels_text: bool = True,
         show_filtration_text: bool = True,
+        stage_order: Optional[List] = None,
+        stage_labels: Optional[List] = None,
+        x_axis_label: str = "Cluster Evolution Stages",
+        gray_second_layer: bool = True,
     ) -> plt.Figure:
         """
-        Plot a 5-stage Sankey diagram showing cluster evolution. using ComponentEvolutionVisualizer
+        Plot a Sankey diagram showing cluster evolution using ComponentEvolutionVisualizer.
+
+        Pass ``stage_order``/``stage_labels`` to render cross-layer evolution
+        (x-axis = model depth) instead of intra-layer filtration.
 
         Args:
             cluster_evolution: Dictionary from ClusterFlowAnalyzer.compute_cluster_evolution()
@@ -1051,6 +1093,10 @@ class FlowVisualizer:
                 title,
                 show_true_labels_text=show_true_labels_text,
                 show_filtration_text=show_filtration_text,
+                stage_order=stage_order,
+                stage_labels=stage_labels,
+                x_axis_label=x_axis_label,
+                gray_second_layer=gray_second_layer,
             )
             break  # avoid plotting all distance metrics in one plot
 
@@ -1068,6 +1114,10 @@ class FlowVisualizer:
         title: str = "5-Stage Cluster Evolution",
         show_true_labels_text: bool = True,
         show_filtration_text: bool = True,
+        stage_order: Optional[List] = None,
+        stage_labels: Optional[List] = None,
+        x_axis_label: str = "Cluster Evolution Stages",
+        gray_second_layer: bool = True,
     ) -> plt.Figure:
         """
         Plot a stacked bar chart showing cluster evolution using ComponentEvolutionVisualizer
@@ -1105,6 +1155,10 @@ class FlowVisualizer:
                 title,
                 show_true_labels_text=show_true_labels_text,
                 show_filtration_text=show_filtration_text,
+                stage_order=stage_order,
+                stage_labels=stage_labels,
+                x_axis_label=x_axis_label,
+                gray_second_layer=gray_second_layer,
             )
             break  # so that we only plot one distance metric in one plot
 

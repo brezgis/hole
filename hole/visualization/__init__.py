@@ -9,6 +9,11 @@ class is located in the parent hole package.
 # Distance functions are now in core
 from ..core.distance_metrics import distance_matrix, euclidean
 from .cluster_flow import ClusterFlowAnalyzer, ComponentEvolutionVisualizer
+from .layer_flow import (
+    LayerEvolutionAnalyzer,
+    analyze_layer_flows,
+    cluster_to_k,
+)
 
 # Persistence plotting functions — use these directly, or use
 # HOLEVisualizer.plot_persistence_diagram(...) for the class-style API.
@@ -25,6 +30,9 @@ __all__ = [
     "BlobVisualizer",
     "ComponentEvolutionVisualizer",
     "ClusterFlowAnalyzer",
+    "LayerEvolutionAnalyzer",
+    "analyze_layer_flows",
+    "cluster_to_k",
     "PersistenceDendrogram",
     # Plotting functions
     "plot_persistence_diagram",
