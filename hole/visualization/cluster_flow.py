@@ -157,7 +157,7 @@ class ClusterFlowAnalyzer:
         Select 4 meaningful thresholds for 5-stage visualization:
         Stage 1: True labels (not a threshold)
         Stage 2: Initial clusters (very small threshold - many clusters)
-        Stage 3: Clusters similar to true labels (threshold where clusters roughly match CIFAR-10)
+        Stage 3: Clusters similar to true labels (threshold where clusters roughly match the true classes)
         Stage 4: Intermediate merging (between similar and final)
         Stage 5: Final single cluster
         """
@@ -235,7 +235,8 @@ class ClusterFlowAnalyzer:
         Uses clustering purity/homogeneity to find best match.
         """
         if true_labels is None:
-            # Fallback: use threshold that gives ~10 clusters
+            # Fallback when no labels are available: aim for a moderate, dataset
+            # -agnostic number of clusters rather than the fully-merged extreme.
             target_clusters = 10
             best_threshold = all_thresholds[len(all_thresholds) // 3]
             best_score = float("inf")
@@ -359,7 +360,6 @@ class ClusterFlowAnalyzer:
 class ComponentEvolutionVisualizer:
     """
     A class for visualizing component evolution through death thresholds.
-    Based on the reference implementation from the user's Jupyter notebook.
     """
 
     def __init__(self, components_, labels_, class_names=None):
