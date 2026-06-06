@@ -341,9 +341,10 @@ class PersistenceDendrogram:
             Per-point class ids (original index order). If provided, draws a
             color band beneath the dendrogram instead of text labels.
         class_colors : list or dict, optional
-            Override colors. List indexed by class id (e.g. ``['blue', 'red']``)
-            or dict (e.g. ``{0: 'blue', 1: 'red'}``). Falls back to
-            ``get_label_color`` if omitted.
+            Override colors. A list is indexed by position in the sorted unique
+            classes (e.g. ``['blue', 'red']`` -> first/second class); a dict is
+            keyed by class id (e.g. ``{0: 'blue', 1: 'red'}``). Falls back to
+            ``get_label_color`` (keyed by raw class id) if omitted.
         class_names : list or dict, optional
             Display names for the legend. Falls back to ``"class {id}"``.
         show_legend : bool, default True
@@ -384,7 +385,10 @@ class PersistenceDendrogram:
         def resolve_color(cid):
             pos = class_pos[cid]
             if class_colors is None:
-                return get_label_color(pos, n_classes=max(n_classes, 2))
+                # Pass the raw class id (not its sorted position) so colors match
+                # the rest of the library (scatter_hull, cluster_flow) and so the
+                # noise label -1 keeps its gray special-case in get_label_color.
+                return get_label_color(cid, n_classes=max(n_classes, 2))
             if isinstance(class_colors, dict):
                 return class_colors[cid]
             return class_colors[pos]
@@ -396,7 +400,10 @@ class PersistenceDendrogram:
                 return class_names.get(cid, f"class {cid}")
             return class_names[class_pos[cid]]
 
-        fig = plt.figure(figsize=figsize, layout="constrained")
+        # Use the constrained_layout=True kwarg (matplotlib >= 2.2) rather than
+        # layout="constrained" (3.6+) to stay compatible with the project's
+        # matplotlib >= 3.5 floor.
+        fig = plt.figure(figsize=figsize, constrained_layout=True)
         gs = fig.add_gridspec(2, 1, height_ratios=[20, 1], hspace=0.05)
         ax_dendro = fig.add_subplot(gs[0])
         ax_band = fig.add_subplot(gs[1])

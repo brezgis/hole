@@ -25,11 +25,13 @@ being forced by a per-layer purity-matched threshold.
 """
 
 import os
-from typing import Dict, List, Optional, Sequence, Union
+import re
+from typing import Dict, Optional, Sequence, Union
 
 import numpy as np
 from loguru import logger
-from scipy.sparse.csgraph import minimum_spanning_tree
+from scipy.cluster.hierarchy import fcluster, linkage
+from scipy.spatial.distance import squareform
 
 from ..core.distance_metrics import (
     chebyshev_distance,
@@ -38,7 +40,6 @@ from ..core.distance_metrics import (
     mahalanobis_distance,
     manhattan_distance,
 )
-from ..core.persistence import compute_cluster_evolution as _compute_cluster_evolution
 from .cluster_flow import FlowVisualizer
 
 # Map friendly metric names to the core distance-matrix builders. Keys double as
@@ -55,13 +56,19 @@ METRIC_FUNCS = {
 def cluster_to_k(distance_matrix: np.ndarray, k: int) -> tuple:
     """Cut the single-linkage hierarchy of ``distance_matrix`` into ``k`` clusters.
 
-    For 0-dimensional persistent homology of a Rips filtration, the death events
-    are exactly the minimum-spanning-tree edge weights: each finite death merges
-    two components, so after including the ``m`` smallest MST edges there are
-    ``n - m`` connected components. To obtain ``k`` clusters we therefore choose
-    the threshold equal to the ``(n - k)``-th smallest MST edge weight and label
-    points by connected components at that threshold. This is exact, needs no
-    GUDHI call, and can always reach any ``k`` in ``[1, n]``.
+    Single-linkage agglomeration is exactly the 0-dimensional persistent-homology
+    merge order of a Rips filtration (the dendrogram merge heights are the death
+    thresholds / minimum-spanning-tree edge weights). We build that hierarchy with
+    :func:`scipy.cluster.hierarchy.linkage` and cut it to (at most) ``k`` flat
+    clusters with ``fcluster(..., criterion="maxclust")``.
+
+    Using ``maxclust`` rather than a raw distance threshold is important: when
+    several merges happen at the *same* height (tied distances -- common with
+    quantized embeddings or cosine distance on near-collinear vectors), a single
+    ``distance <= t`` cut would include all of them at once and collapse far below
+    ``k``. ``maxclust`` cuts the dendrogram structurally, so it returns ``k``
+    clusters whenever the hierarchy admits them, and fewer only when genuinely
+    tied points cannot be separated (which is the honest answer).
 
     Parameters
     ----------
@@ -73,31 +80,36 @@ def cluster_to_k(distance_matrix: np.ndarray, k: int) -> tuple:
     Returns
     -------
     (threshold, labels) : (float, np.ndarray)
-        The chosen filtration threshold and the integer cluster label per point.
-        Note: ties in MST edge weights can yield slightly fewer than ``k``
-        clusters (several merges happen at one threshold); this is reported via
-        the returned ``labels`` and is itself informative.
+        A representative cut height (the merge height just below the cut, for
+        logging) and the 0-based integer cluster label per point. The number of
+        distinct labels may be < ``k`` only when tied distances force simultaneous
+        merges.
     """
     n = distance_matrix.shape[0]
-    k = int(max(1, min(k, n)))
+    k = int(max(1, min(k, max(n, 1))))
 
-    # MST edge weights, ascending -- the single-linkage merge (death) thresholds.
-    mst = minimum_spanning_tree(distance_matrix).toarray()
-    weights = np.sort(mst[mst > 0.0])
+    if n <= 1:
+        return 0.0, np.zeros(n, dtype=int)
 
-    if k >= n or weights.size == 0:
-        threshold = 0.0  # every point is its own cluster
+    # Condensed, symmetric, zero-diagonal form for scipy linkage.
+    d = np.asarray(distance_matrix, dtype=float)
+    d = 0.5 * (d + d.T)
+    np.fill_diagonal(d, 0.0)
+    condensed = squareform(d, checks=False)
+
+    Z = linkage(condensed, method="single")
+    labels = fcluster(Z, t=k, criterion="maxclust") - 1  # 0-based, like the old path
+
+    # Representative threshold for logging: the merge height bracketing the cut.
+    merge_heights = Z[:, 2]
+    if k >= n:
+        threshold = 0.0
     elif k <= 1:
-        threshold = float(weights[-1])  # one merge short of fully connected
+        threshold = float(merge_heights[-1])
     else:
-        # Need (n - k) merges -> include the (n - k) smallest MST edges.
-        idx = min(max(n - k - 1, 0), weights.size - 1)
-        threshold = float(weights[idx])
+        threshold = float(merge_heights[n - k - 1])
 
-    labels = _compute_cluster_evolution(distance_matrix, [threshold])[threshold][
-        "labels"
-    ]
-    return threshold, np.asarray(labels)
+    return threshold, np.asarray(labels, dtype=int)
 
 
 class LayerEvolutionAnalyzer:
@@ -175,18 +187,27 @@ class LayerEvolutionAnalyzer:
 
     def _resolve_stages(self, layers):
         """Resolve the requested layers into ordered (key, display-label) pairs."""
+        if not self.embeddings:
+            raise ValueError("`embeddings` is empty -- nothing to analyze.")
+
         if layers is None:
-            keys = list(self.embeddings.keys())
 
             def _natural_key(key):
-                tail = key.rsplit("_", 1)[-1]
-                return (0, int(tail)) if tail.isdigit() else (1, key)
+                # Natural sort: split into text/number chunks so layer_2 < layer_10
+                # regardless of underscores or zero-padding.
+                return [
+                    int(tok) if tok.isdigit() else tok
+                    for tok in re.split(r"(\d+)", str(key))
+                ]
 
-            keys = sorted(keys, key=_natural_key)
+            def _label_for(key):
+                # Display the trailing integer if there is one, else the key.
+                nums = re.findall(r"\d+", str(key))
+                return self.stage_label_fmt.format(nums[-1] if nums else key)
+
+            keys = sorted(self.embeddings.keys(), key=_natural_key)
             self.stage_keys = keys
-            self.stage_labels = [
-                self.stage_label_fmt.format(k.rsplit("_", 1)[-1]) for k in keys
-            ]
+            self.stage_labels = [_label_for(k) for k in keys]
         else:
             stage_keys, stage_labels = [], []
             for item in layers:
@@ -206,6 +227,9 @@ class LayerEvolutionAnalyzer:
                 stage_labels.append(label)
             self.stage_keys = stage_keys
             self.stage_labels = stage_labels
+
+        if not self.stage_keys:
+            raise ValueError("No layers selected -- `layers` resolved to an empty list.")
 
     def _subsample_indices(self, n_points: int) -> Optional[np.ndarray]:
         """Choose subsample indices once, shared across all layers."""
@@ -229,6 +253,25 @@ class LayerEvolutionAnalyzer:
         # Determine N from the first requested layer and pick shared subsample.
         first = self.embeddings[self.stage_keys[0]]
         n_points = first.shape[0]
+
+        # Cross-layer flow requires that row i is the same example at every layer
+        # and that true_labels lines up with those rows. Validate up front rather
+        # than letting a mismatch silently truncate flows (zip) or crash deep in
+        # the renderer.
+        if self.true_labels.shape[0] != n_points:
+            raise ValueError(
+                f"true_labels length ({self.true_labels.shape[0]}) does not match "
+                f"the number of points in layer '{self.stage_keys[0]}' ({n_points})."
+            )
+        for key in self.stage_keys:
+            n_key = np.asarray(self.embeddings[key]).shape[0]
+            if n_key != n_points:
+                raise ValueError(
+                    f"Layer '{key}' has {n_key} points but layer "
+                    f"'{self.stage_keys[0]}' has {n_points}. Cross-layer flow "
+                    "needs the same, aligned points at every layer."
+                )
+
         idx = self._subsample_indices(n_points)
 
         true_labels = self.true_labels
@@ -318,10 +361,17 @@ def analyze_layer_flows(
     import matplotlib.pyplot as plt
 
     if isinstance(embeddings, str):
-        embeddings = np.load(embeddings, allow_pickle=True).item()
+        # allow_pickle=True is required to load a dict saved with np.save; only
+        # point this at .npy files you trust (pickle can execute arbitrary code).
+        loaded = np.load(embeddings, allow_pickle=True)
+        try:
+            embeddings = loaded.item()  # unwrap a 0-d object array holding the dict
+        except (ValueError, AttributeError):
+            embeddings = loaded  # not a 0-d wrapper; fall through to the dict check
     if not isinstance(embeddings, dict):
         raise TypeError(
-            f"embeddings must be a dict or path to a .npy dict, got {type(embeddings)}"
+            "embeddings must be a dict {layer_key: ndarray(N, D)} or a path to a "
+            f".npy file containing such a dict; got {type(embeddings)}"
         )
 
     out_dir = os.path.join(output_dir, f"{model_name}_{condition_name}")
