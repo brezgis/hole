@@ -249,7 +249,8 @@ def plot_dimensionality_reduction(
         - Distance matrix (will be converted using MDS)
         - Tuple of (x, y) coordinates for direct plotting
     method : str, optional
-        Dimensionality reduction method ('pca', 'tsne', 'mds')
+        Dimensionality reduction method: 'pca', 'mds', 'tsne', 'umap', or
+        'phate' (PHATE recommended for neural-network latent spaces).
     labels : np.ndarray, optional
         Labels for coloring points
     ax : matplotlib.axes.Axes, optional
@@ -364,89 +365,56 @@ def plot_dimensionality_reduction(
 
 def _perform_dimensionality_reduction(
     data: np.ndarray, method: str = "pca", n_components: int = 2, random_state: int = 42,
-    metric: str = "euclidean",
+    metric: str = "euclidean", **kwargs,
 ) -> np.ndarray:
     """
     Perform dimensionality reduction on data.
 
+    Delegates to :mod:`hole.projections`, which provides a single ``project``
+    entry point over PCA, MDS, t-SNE, UMAP and PHATE, handles both feature
+    matrices and precomputed distance matrices, and degrades gracefully when an
+    optional backend (``umap-learn`` / ``phate``) is not installed.
+
     Parameters
     ----------
     data : np.ndarray
-        Input data for dimensionality reduction
+        Input data: a feature matrix ``(n_samples, n_features)`` or a precomputed
+        symmetric distance matrix ``(n_samples, n_samples)`` (auto-detected).
     method : str
-        Method to use ('pca', 'tsne', 'mds')
+        Method to use: ``'pca'``, ``'mds'``, ``'tsne'``, ``'umap'`` or
+        ``'phate'``. PHATE is recommended for neural-network latent spaces.
     n_components : int
-        Number of components for output
+        Number of components for the output.
     random_state : int
-        Random state for reproducibility
+        Random state for reproducibility.
     metric : str
-        Distance metric to use for non-precomputed data ('euclidean', 'cosine', etc.)
+        Distance metric for non-precomputed data ('euclidean', 'cosine', ...).
+    **kwargs
+        Extra method-specific arguments forwarded to the underlying estimator
+        (e.g. PHATE ``knn``/``decay``/``t``, UMAP ``n_neighbors``/``min_dist``,
+        t-SNE ``perplexity``).
 
     Returns
     -------
     np.ndarray
-        Reduced data
+        Reduced data ``(n_samples, n_components)``.
     """
-    if method.lower() == "pca":
-        if data.shape[0] == data.shape[1] and np.allclose(data, data.T):
-            # Distance matrix - convert to coordinates using MDS first
-            warnings.warn(
-                "PCA requested but distance matrix detected. Using MDS instead."
-            )
-            reducer = MDS(
-                n_components=n_components,
-                random_state=random_state,
-                dissimilarity="precomputed",
-                n_init=4,
-                max_iter=1000,
-            )
-            return reducer.fit_transform(data)
-        else:
-            reducer = PCA(n_components=n_components, random_state=random_state)
-            return reducer.fit_transform(data)
+    from ..projections import project, METHODS
 
-    elif method.lower() == "tsne":
-        if data.shape[0] == data.shape[1] and np.allclose(data, data.T):
-            # Distance matrix
-            reducer = TSNE(
-                n_components=n_components,
-                random_state=random_state,
-                metric="precomputed",
-                perplexity=min(30, (data.shape[0] - 1) // 3),
-                n_iter=1000,
-            )
-        else:
-            # Feature matrix
-            perplexity = min(30, (data.shape[0] - 1) // 3)
-            perplexity = max(5, perplexity)  # Ensure minimum perplexity
-            reducer = TSNE(
-                n_components=n_components,
-                random_state=random_state,
-                perplexity=perplexity,
-                max_iter=1000,
-            )
-        return reducer.fit_transform(data)
-
-    elif method.lower() == "mds":
-        if data.shape[0] == data.shape[1] and np.allclose(data, data.T):
-            # Distance matrix
-            reducer = MDS(
-                n_components=n_components,
-                random_state=random_state,
-                dissimilarity="precomputed",
-                n_init=4,
-                max_iter=1000,
-            )
-        else:
-            # Feature matrix
-            reducer = MDS(
-                n_components=n_components,
-                random_state=random_state,
-                dissimilarity=metric,
-                n_init=4,
-                max_iter=1000,
-            )
-        return reducer.fit_transform(data)
-
-    else:
-        raise ValueError(f"Unknown method: {method}. Use 'pca', 'tsne', or 'mds'")
+    if method.lower() not in METHODS:
+        raise ValueError(
+            f"Unknown method: {method}. Use one of {METHODS}."
+        )
+    # `project` auto-detects a precomputed distance matrix (square + symmetric +
+    # zero diagonal), matching the previous behaviour, and picks the right mode
+    # per method (e.g. MDS for PCA-on-distances, precomputed metrics elsewhere).
+    return np.asarray(
+        project(
+            data,
+            method=method,
+            n_components=n_components,
+            metric=metric,
+            random_state=random_state,
+            **kwargs,
+        )
+    )

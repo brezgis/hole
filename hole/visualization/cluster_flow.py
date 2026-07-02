@@ -10,9 +10,7 @@ import os
 from collections import Counter, defaultdict
 from typing import Dict, List, Optional, Tuple
 
-import gudhi as gd
 import matplotlib.pyplot as plt
-import networkx as nx
 import numpy as np
 from loguru import logger
 from matplotlib.patches import FancyBboxPatch
@@ -25,6 +23,56 @@ from ..core.distance_metrics import (
     mahalanobis_distance,
 )
 from ..core.persistence import compute_cluster_evolution as _compute_cluster_evolution
+
+
+class _UnionFind:
+    """Minimal union-find (disjoint-set) with path compression + union by rank.
+
+    Used to sweep single-linkage/MST merges incrementally: instead of rebuilding
+    a graph and recomputing connected components at every threshold (O(n^2)
+    each), we start from n singletons and union one MST edge at a time as the
+    threshold rises, so advancing to the next threshold is near-O(1) amortised.
+    """
+
+    __slots__ = ("parent", "rank", "n_comp")
+
+    def __init__(self, n: int):
+        self.parent = list(range(n))
+        self.rank = [0] * n
+        self.n_comp = n
+
+    def find(self, x: int) -> int:
+        root = x
+        while self.parent[root] != root:
+            root = self.parent[root]
+        while self.parent[x] != root:
+            self.parent[x], x = root, self.parent[x]
+        return root
+
+    def union(self, a: int, b: int) -> bool:
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return False
+        if self.rank[ra] < self.rank[rb]:
+            ra, rb = rb, ra
+        self.parent[rb] = ra
+        if self.rank[ra] == self.rank[rb]:
+            self.rank[ra] += 1
+        self.n_comp -= 1
+        return True
+
+    def labels(self) -> np.ndarray:
+        """Consecutive integer labels (0..k-1) for the current partition."""
+        roots = [self.find(i) for i in range(len(self.parent))]
+        remap = {}
+        out = np.empty(len(roots), dtype=int)
+        for i, r in enumerate(roots):
+            cid = remap.get(r)
+            if cid is None:
+                cid = len(remap)
+                remap[r] = cid
+            out[i] = cid
+        return out
 
 
 class ClusterFlowAnalyzer:
@@ -47,6 +95,103 @@ class ClusterFlowAnalyzer:
         self.death_thresholds = None
         self.cluster_evolution = None
 
+        # MST cache: single-linkage merge structure, computed once and reused for
+        # every threshold query (see _ensure_mst / _labels_at / _sweep_best).
+        self._mst_w = None  # sorted MST edge weights (== H0 death thresholds)
+        self._mst_r = None  # edge endpoints, aligned with _mst_w
+        self._mst_c = None
+
+    # ------------------------------------------------------------------ #
+    # MST-backed connectivity (fast, exact for any symmetric distance)
+    # ------------------------------------------------------------------ #
+    def _ensure_mst(self):
+        """Compute (once) the MST of the distance graph and sort its edges.
+
+        Connected components of the "distance <= t" graph are identical to those
+        of the MST restricted to edges with weight <= t -- a minimax-path
+        property that holds for ANY symmetric non-negative weight matrix, metric
+        or not. So the sorted MST edge weights ARE the H0 death thresholds
+        (single-linkage merge heights), and we never need to build the full Rips
+        complex or a dense per-threshold graph.
+        """
+        if self._mst_w is not None:
+            return
+        from scipy.sparse import csr_matrix
+        from scipy.sparse.csgraph import minimum_spanning_tree
+
+        D = np.array(self.distance_matrix, dtype=float, copy=True)
+        n = self.n_points
+        # Exact-zero off-diagonal distances (duplicate/near-duplicate points --
+        # ubiquitous in LLM latents) would be dropped by the sparse
+        # representation and those points would never merge. Bump them to a tiny
+        # positive epsilon so they become the earliest (cheapest) merges.
+        off = ~np.eye(n, dtype=bool)
+        pos = D[off & (D > 0)]
+        eps = (pos.min() * 1e-6) if pos.size else 1e-12
+        zero_off = off & (D <= 0)
+        if zero_off.any():
+            D[zero_off] = eps
+
+        mst = minimum_spanning_tree(csr_matrix(D)).tocoo()
+        w, r, c = mst.data, mst.row, mst.col
+        order = np.argsort(w, kind="mergesort")  # stable, ascending
+        self._mst_w = w[order]
+        self._mst_r = r[order].astype(int)
+        self._mst_c = c[order].astype(int)
+
+    def _all_merge_thresholds(self) -> List[float]:
+        """Distinct single-linkage merge heights, ascending (the H0 deaths)."""
+        self._ensure_mst()
+        if self._mst_w is None or len(self._mst_w) == 0:
+            return []
+        return sorted(set(self._mst_w.tolist()))
+
+    def _labels_at(self, threshold: float) -> np.ndarray:
+        """Cluster labels at ``threshold`` via union-find over MST edges <= t."""
+        self._ensure_mst()
+        uf = _UnionFind(self.n_points)
+        k = int(np.searchsorted(self._mst_w, threshold, side="right"))
+        for i in range(k):
+            uf.union(int(self._mst_r[i]), int(self._mst_c[i]))
+        return uf.labels()
+
+    def _n_clusters_at(self, threshold: float) -> int:
+        """Number of connected components at ``threshold`` (cheap)."""
+        self._ensure_mst()
+        k = int(np.searchsorted(self._mst_w, threshold, side="right"))
+        # each distinct merge reduces the component count by one
+        uf = _UnionFind(self.n_points)
+        for i in range(k):
+            uf.union(int(self._mst_r[i]), int(self._mst_c[i]))
+        return uf.n_comp
+
+    def _sweep_best(self, thresholds, score_fn, maximize=True):
+        """Scan ``thresholds`` (ascending) with ONE incremental union-find.
+
+        For each threshold we advance the union-find over any MST edges that have
+        become active, then score the current partition. Because the union-find
+        is never rebuilt, the whole sweep is ~O(n alpha(n) + L * score_cost)
+        instead of O(L * n^2) -- this is the "jump ahead between merge events"
+        optimisation. Returns (best_threshold, best_score).
+        """
+        self._ensure_mst()
+        thresholds = list(thresholds)
+        if not thresholds:
+            return None, None
+        uf = _UnionFind(self.n_points)
+        w, r, c = self._mst_w, self._mst_r, self._mst_c
+        m = len(w)
+        ei = 0
+        best_t, best_s = thresholds[0], (-np.inf if maximize else np.inf)
+        for t in thresholds:
+            while ei < m and w[ei] <= t:
+                uf.union(int(r[ei]), int(c[ei]))
+                ei += 1
+            s = score_fn(uf.labels())
+            if (maximize and s > best_s) or (not maximize and s < best_s):
+                best_s, best_t = s, t
+        return best_t, best_s
+
     def compute_cluster_evolution(
         self, true_labels: Optional[np.ndarray] = None,
         filter_small_clusters: bool = False,
@@ -66,21 +211,16 @@ class ClusterFlowAnalyzer:
         Returns:
             Dictionary containing components_ and labels_ in the expected format
         """
-        logger.info("Computing persistent homology...")
+        logger.info("Computing single-linkage merge thresholds (via MST)...")
 
-        # Create Rips complex and compute persistence
-        rips_complex = gd.RipsComplex(distance_matrix=self.distance_matrix)
-        simplex_tree = rips_complex.create_simplex_tree(max_dimension=1)
-        self.persistence = simplex_tree.persistence()
-
-        # Extract death thresholds for 0-dimensional features (connected components)
-        death_thresholds = []
-        for dim, (birth, death) in self.persistence:
-            if dim == 0 and death != float("inf"):
-                death_thresholds.append(death)
-
-        # Sort all thresholds
-        all_thresholds = sorted(set(death_thresholds))
+        # The H0 death thresholds of the Rips filtration are exactly the
+        # single-linkage merge heights, i.e. the MST edge weights. Deriving them
+        # from the MST avoids building the full Rips simplex tree over all
+        # O(n^2) edges just to read off H0 -- a large speedup on the filtering
+        # step. self.persistence is kept populated (as H0 birth/death pairs) so
+        # the public attribute still means something.
+        all_thresholds = self._all_merge_thresholds()
+        self.persistence = [(0, (0.0, t)) for t in all_thresholds]
         logger.info(f"Found {len(all_thresholds)} total death thresholds")
 
         # Select 4 specific thresholds for meaningful 5-stage evolution
@@ -160,69 +300,86 @@ class ClusterFlowAnalyzer:
         Stage 3: Clusters similar to true labels (threshold where clusters roughly match the true classes)
         Stage 4: Intermediate merging (between similar and final)
         Stage 5: Final single cluster
+
+        Robust to duplicate/tied thresholds: the four semantic picks may collide
+        (e.g. when many pairwise distances are equal), so after de-duplicating we
+        BACKFILL from the remaining thresholds to always return as many distinct
+        stages as are available (up to 4). This prevents the downstream Sankey /
+        stacked-bar plots -- which require >= 4 stages -- from silently failing
+        with "Need >= 4 stages" whenever two picks happen to coincide.
         """
+        # De-duplicate up front so all reasoning below is over distinct values.
+        all_thresholds = sorted(set(all_thresholds))
         if len(all_thresholds) < 4:
-            logger.warning("Not enough thresholds, using all available")
+            logger.warning(
+                f"Only {len(all_thresholds)} distinct threshold(s) available; "
+                "using all of them."
+            )
             return all_thresholds
 
-        # Stage 2: Initial clusters - use smallest threshold (many small clusters)
+        # Stage 2: Initial clusters - smallest threshold (many small clusters)
         initial_threshold = all_thresholds[0]
 
-        # Stage 5: Final cluster - find threshold where we get 1 cluster
-        final_threshold = None
-        for threshold in reversed(all_thresholds):
-            # Test this threshold
-            adj_matrix = (self.distance_matrix <= threshold).astype(int)
-            np.fill_diagonal(adj_matrix, 0)
-            graph = nx.from_numpy_array(adj_matrix)
-            n_components = nx.number_connected_components(graph)
-            if n_components == 1:
-                final_threshold = threshold
-                break
+        # Stage 5: Final single cluster. Skip-ahead: the whole graph is connected
+        # once the last MST edge activates, so the answer is simply the largest
+        # merge height -- no per-threshold connectivity scan needed.
+        final_threshold = all_thresholds[-1]
+        if self._n_clusters_at(final_threshold) != 1:
+            # Disconnected distance graph (e.g. inf distances): fall back to the
+            # threshold that yields the fewest components.
+            final_threshold = min(
+                all_thresholds, key=lambda t: self._n_clusters_at(t)
+            )
 
-        if final_threshold is None:
-            final_threshold = all_thresholds[-1]
-
-        # Stage 3: Find threshold where clusters are most similar to true labels
+        # Stage 3: threshold whose clustering best matches the true labels.
         similar_threshold = self._find_similar_to_true_labels(
             all_thresholds, true_labels
         )
 
-        # Stage 4: Intermediate threshold - between similar and final
+        # Stage 4: intermediate threshold between "similar" and "final".
         intermediate_candidates = [
             t for t in all_thresholds if similar_threshold < t < final_threshold
         ]
         if intermediate_candidates:
-            # Pick middle of the candidates
             intermediate_threshold = intermediate_candidates[
                 len(intermediate_candidates) // 2
             ]
         else:
-            # Fallback: pick something between similar and final
-            intermediate_threshold = (similar_threshold + final_threshold) / 2
-            # Find closest actual threshold
+            target = (similar_threshold + final_threshold) / 2
             intermediate_threshold = min(
-                all_thresholds, key=lambda x: abs(x - intermediate_threshold)
+                all_thresholds, key=lambda x: abs(x - target)
             )
 
-        selected = [
-            initial_threshold,
-            similar_threshold,
-            intermediate_threshold,
-            final_threshold,
-        ]
+        # De-duplicate the semantic picks, preserving their meaningful order.
+        selected = []
+        for t in (initial_threshold, similar_threshold,
+                  intermediate_threshold, final_threshold):
+            if t not in selected:
+                selected.append(t)
 
-        # Remove duplicates and sort
-        selected = sorted(list(set(selected)))
+        # Backfill to 4 distinct stages when picks collided, drawing evenly from
+        # the thresholds strictly between the smallest and largest already-picked
+        # values so the added stages are informative rather than clumped.
+        target_n = min(4, len(all_thresholds))
+        if len(selected) < target_n:
+            pool = [t for t in all_thresholds if t not in selected]
+            # order pool by distance to the centre of the current spread so the
+            # gaps get filled first
+            lo, hi = min(selected), max(selected)
+            mid = 0.5 * (lo + hi)
+            pool.sort(key=lambda t: abs(t - mid))
+            for t in pool:
+                if len(selected) >= target_n:
+                    break
+                selected.append(t)
+
+        selected = sorted(selected)
 
         logger.info("Selected thresholds breakdown:")
-        logger.info(f"  Initial (many clusters): {selected[0]:.4f}")
-        if len(selected) > 1:
-            logger.info(f"  Similar to true labels: {selected[1]:.4f}")
-        if len(selected) > 2:
-            logger.info(f"  Intermediate merging: {selected[2]:.4f}")
-        if len(selected) > 3:
-            logger.info(f"  Final single cluster: {selected[3]:.4f}")
+        stage_names = ["Initial (many clusters)", "Similar to true labels",
+                       "Intermediate merging", "Final single cluster"]
+        for name, t in zip(stage_names, selected):
+            logger.info(f"  {name}: {t:.4f}")
 
         return selected
 
@@ -234,60 +391,52 @@ class ClusterFlowAnalyzer:
         are grouped together with their original class labels (with some outliers).
         Uses clustering purity/homogeneity to find best match.
         """
+        if not all_thresholds:
+            return 0.0
+
         if true_labels is None:
             # Fallback when no labels are available: aim for a moderate, dataset
             # -agnostic number of clusters rather than the fully-merged extreme.
+            # Uses the incremental MST sweep (no dense per-threshold graphs).
             target_clusters = 10
-            best_threshold = all_thresholds[len(all_thresholds) // 3]
-            best_score = float("inf")
-
-            for threshold in all_thresholds:
-                adj_matrix = (self.distance_matrix <= threshold).astype(int)
-                np.fill_diagonal(adj_matrix, 0)
-                graph = nx.from_numpy_array(adj_matrix)
-                n_components = nx.number_connected_components(graph)
-
-                score = abs(n_components - target_clusters)
-                if score < best_score:
-                    best_score = score
-                    best_threshold = threshold
-
-            return best_threshold
+            best_threshold, _ = self._sweep_best(
+                all_thresholds,
+                score_fn=lambda labels: abs(len(set(labels.tolist())) - target_clusters),
+                maximize=False,
+            )
+            return best_threshold if best_threshold is not None else all_thresholds[0]
 
         logger.info("Finding threshold where data points cluster with their true labels...")
 
-        best_threshold = all_thresholds[len(all_thresholds) // 3]  # Default fallback
-        best_score = 0.0  # We want to maximize clustering quality
+        true_labels = np.asarray(true_labels)
+        # Densify true labels to 0..c-1 once so scoring can use a contingency
+        # matrix instead of per-cluster np.unique loops (much faster per sweep).
+        uniq_true = np.unique(true_labels)
+        true_dense = np.searchsorted(uniq_true, true_labels)
+        n_true = len(uniq_true)
+        n_total = len(true_dense)
 
-        # Test thresholds to find one where clusters best match true labels
-        for threshold in all_thresholds:
-            adj_matrix = (self.distance_matrix <= threshold).astype(int)
-            np.fill_diagonal(adj_matrix, 0)
-            graph = nx.from_numpy_array(adj_matrix)
-            components = list(nx.connected_components(graph))
+        def _combined(cluster_labels):
+            # Build the cluster x true-class contingency table in one vectorised
+            # pass. Purity = sum of per-cluster maxima / N (each cluster's
+            # majority true class); homogeneity = sum of per-true-class maxima / N
+            # (each class's majority cluster). Prioritise purity, keep some
+            # homogeneity.
+            k = int(cluster_labels.max()) + 1 if len(cluster_labels) else 0
+            if k == 0 or n_total == 0:
+                return 0.0
+            contingency = np.zeros((k, n_true), dtype=np.int64)
+            np.add.at(contingency, (cluster_labels, true_dense), 1)
+            purity = contingency.max(axis=1).sum() / n_total
+            homogeneity = contingency.max(axis=0).sum() / n_total
+            return 0.7 * purity + 0.3 * homogeneity
 
-            # Create cluster labels
-            cluster_labels = np.zeros(self.n_points, dtype=int)
-            for cluster_id, component in enumerate(components):
-                for node in component:
-                    cluster_labels[node] = cluster_id
-
-            # Calculate clustering quality metrics
-            purity_score = self._calculate_purity(true_labels, cluster_labels)
-            homogeneity_score = self._calculate_homogeneity(true_labels, cluster_labels)
-
-            # Combined score: prioritize high purity and reasonable homogeneity
-            # Purity measures how "pure" each cluster is (same true label)
-            # Homogeneity measures how well each true class is in one cluster
-            combined_score = 0.7 * purity_score + 0.3 * homogeneity_score
-
-            logger.debug(
-                f"    Threshold {threshold:.4f}: {len(components)} clusters, purity={purity_score:.3f}, homogeneity={homogeneity_score:.3f}, combined={combined_score:.3f}"
-            )
-
-            if combined_score > best_score:
-                best_score = combined_score
-                best_threshold = threshold
+        best_threshold, best_score = self._sweep_best(
+            all_thresholds, score_fn=_combined, maximize=True
+        )
+        if best_threshold is None:
+            best_threshold = all_thresholds[len(all_thresholds) // 3]
+            best_score = 0.0
 
         logger.info(f"    Best threshold: {best_threshold:.4f} (score: {best_score:.3f})")
         return best_threshold

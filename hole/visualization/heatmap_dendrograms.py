@@ -751,9 +751,11 @@ def run_persistence_analysis_on_results(
         results_dir: Directory containing model results
         max_points: Maximum points per analysis (for computational efficiency)
     """
+    # Resolve to absolute so all paths below are independent of the cwd.
+    results_dir = os.path.abspath(os.path.expanduser(results_dir))
     logger.info(f"Running persistence analysis on {results_dir}...")
 
-    persistence_output_dir = f"{results_dir}/persistence_dendrograms"
+    persistence_output_dir = os.path.join(results_dir, "persistence_dendrograms")
     os.makedirs(persistence_output_dir, exist_ok=True)
 
     # Process each model directory

@@ -244,7 +244,8 @@ class HOLEVisualizer:
         Parameters
         ----------
         method : str, optional
-            Method for dimensionality reduction ('pca', 'tsne', 'mds')
+            Method for dimensionality reduction: 'pca', 'mds', 'tsne', 'umap',
+            or 'phate' (PHATE recommended for neural-network latent spaces).
         ax : matplotlib.axes.Axes, optional
             Axes to plot on. If None, creates new axes.
         true_labels : np.ndarray, optional

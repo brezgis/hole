@@ -407,17 +407,33 @@ class BlobVisualizer:
         """
         logger.info(f"      Creating {method.upper()} plot...")
 
-        # Apply dimensionality reduction
-        if method.lower() == "pca":
-            reducer = PCA(n_components=2, random_state=DEFAULT_RANDOM_STATE)
-            reduced_data = reducer.fit_transform(activations)
-            method_name = "PCA"
-            explained_var = reducer.explained_variance_ratio_
+        # Apply dimensionality reduction via the shared projections module, which
+        # supports pca / mds / tsne / umap / phate (PHATE recommended for NN
+        # latent spaces) and degrades gracefully when an optional backend is
+        # missing.
+        from ..projections import project, METHODS
+
+        if method.lower() not in METHODS:
+            raise ValueError(f"Unknown method: {method}. Use one of {METHODS}.")
+
+        reduced = project(
+            activations,
+            method=method,
+            n_components=2,
+            random_state=DEFAULT_RANDOM_STATE,
+        )
+        reduced_data = np.asarray(reduced)
+        method_name = method.upper()
+
+        # PCA gets informative variance-labelled axes; everything else gets
+        # generic component labels.
+        if method.lower() == "pca" and getattr(reduced, "reducer", None) is not None:
+            explained_var = reduced.reducer.explained_variance_ratio_
             xlabel = f"PC1 ({explained_var[0]:.2%} variance)"
             ylabel = f"PC2 ({explained_var[1]:.2%} variance)"
-
         else:
-            raise ValueError(f"Unknown method: {method}")
+            xlabel = f"{method_name} 1"
+            ylabel = f"{method_name} 2"
 
         # Create plot
         fig, ax = plt.subplots(figsize=self.figsize)
@@ -1095,6 +1111,10 @@ def run_blob_analysis_on_results(
         distance_metrics: List of distance metrics to analyze
         class_names: Optional dictionary mapping class indices to names
     """
+    # Resolve to an absolute path once so nothing below depends on the process
+    # working directory (and so the label-file search never has to escape via
+    # cwd-relative "../" hops).
+    results_dir = os.path.abspath(os.path.expanduser(results_dir))
     logger.info(f"Running blob analysis on {results_dir}...")
 
     if distance_metrics is None:
@@ -1106,24 +1126,20 @@ def run_blob_analysis_on_results(
             "Density_Normalized_Mahalanobis",
         ]
 
-    # Load true labels
-    true_labels = None
-    if results_dir == "results":
-        labels_file = f"{results_dir}/original/true_labels.npy"
-    else:
-        # For compression analysis, try multiple locations
-        possible_paths = [
-            f"{results_dir}/test_labels.npy",  # New location for compression analysis
-            f"{results_dir}/../results/original/true_labels.npy",
-            "results/original/true_labels.npy",
-            f"{results_dir}/original/true_labels.npy",
-        ]
-
-        labels_file = None
-        for path in possible_paths:
-            if os.path.exists(path):
-                labels_file = path
-                break
+    # Load true labels. Search only WITHIN the (absolute) results_dir and its
+    # parent's canonical "results/original" layout -- all resolved to absolute
+    # paths, no cwd-relative fallbacks.
+    parent = os.path.dirname(results_dir)
+    possible_paths = [
+        os.path.join(results_dir, "test_labels.npy"),
+        os.path.join(results_dir, "original", "true_labels.npy"),
+        os.path.join(parent, "results", "original", "true_labels.npy"),
+    ]
+    labels_file = None
+    for path in possible_paths:
+        if os.path.exists(path):
+            labels_file = path
+            break
 
     if labels_file and os.path.exists(labels_file):
         true_labels = np.load(labels_file)
