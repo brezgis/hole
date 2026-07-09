@@ -1,3 +1,23 @@
+# HOLE — extended fork (projections, cross-layer flow, faster cluster-flow)
+
+This is a fork of [**FoxHound0x00/hole**](https://github.com/FoxHound0x00/hole) — *HOLE: Homological Observation of Latent Embeddings* (Sudhanva M. Athreya & Paul Rosen). The original README is preserved unchanged below; this fork keeps all of it and adds:
+
+- **Cross-layer cluster evolution.** Track how latent clusters emerge, split, and merge *across a model's layers* (x-axis = depth, e.g. LLM layers `[0, 8, 16, 24, 31]`), not just through one layer's filtration — via `analyze_layer_flows` / `LayerEvolutionAnalyzer` and a depth-axis Sankey.
+- **A projections module.** Unified `hole/projections.py` covering PCA / MDS / t-SNE / **UMAP** / **PHATE** (precomputed-distance aware, graceful backend fallback; PHATE recommended for NN latent spaces). `plot_dimensionality_reduction` now supports `umap`/`phate` (was pca/tsne/mds only).
+- **Faster, fixed cluster-flow.** Fixes a duplicate-threshold bug that made the Sankey / stacked-bar plots bail out with "need ≥ 4 stages", and rebuilds the threshold scan as an incremental union-find sweep over the MST: **~13× faster** end-to-end (1447 ms → 112 ms at n = 500), identical clustering.
+- **Visualization + packaging.** An optional color band under the dendrogram (map point class → color for large point clouds), now accepting numpy-array labels and coloring by raw class id so noise (`-1`) stays gray; Poetry → PEP 621 / uv packaging with `projections`, `hooks`, and `dev` extras.
+
+### Quick start (this fork)
+```
+git clone https://github.com/brezgis/hole.git
+cd hole
+pip install -e .                 # core
+pip install -e '.[projections]'  # adds the UMAP + PHATE projection backends
+```
+See `SETUP.md` for the uv-based setup and the full list of extras.
+
+---
+
 # HOLE: Homological Observation of Latent Embeddings
 
 [![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
