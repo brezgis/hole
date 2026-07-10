@@ -259,10 +259,36 @@ class HOLEVisualizer:
         -------
         ax : matplotlib.axes.Axes
             The axes object containing the plot
+
+        Notes
+        -----
+        When this visualizer was built from a point cloud, the projection uses
+        the same ``distance_metric`` the persistence computation used (if it is
+        a string metric), so the plot reflects the same geometry as the PH.
+        When built from a distance matrix, ``precomputed=True`` is passed
+        explicitly rather than relying on shape heuristics.
         """
-        data = (
-            self.point_cloud if self.point_cloud is not None else self.distance_matrix
-        )
+        if self.point_cloud is not None:
+            data = self.point_cloud
+            kwargs.setdefault("precomputed", False)
+            # Keep the viz geometry consistent with the PH: project with the
+            # same metric the distance matrix was computed with. (Callable
+            # metrics can't be forwarded to project(); those keep the default.)
+            if isinstance(self.distance_metric, str):
+                kwargs.setdefault("metric", self.distance_metric)
+        else:
+            # Explicit: never let a slightly-asymmetric matrix fall through the
+            # auto-detect heuristic and get treated as a feature matrix. The
+            # projection backends (MDS, PHATE) also *require* exact symmetry /
+            # non-negativity, so hand them a sanitized copy — float solver
+            # noise on the input must not hard-error the viz. (PH upstream
+            # keeps using the raw matrix; the constructor warns on gross
+            # asymmetry.)
+            D = np.asarray(self.distance_matrix, dtype=float)
+            D = 0.5 * (D + D.T)
+            np.fill_diagonal(D, 0.0)
+            data = np.maximum(D, 0.0)
+            kwargs.setdefault("precomputed", True)
         return plot_dimensionality_reduction(
             data, method=method, ax=ax, labels=true_labels, title=title, **kwargs
         )

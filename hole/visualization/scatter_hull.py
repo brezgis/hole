@@ -14,7 +14,6 @@ import numpy as np
 from loguru import logger
 from matplotlib.patches import Polygon
 from scipy.spatial import ConvexHull
-from sklearn.decomposition import PCA
 
 from ..config import DEFAULT_RANDOM_STATE
 
@@ -397,7 +396,7 @@ class BlobVisualizer:
             activations: Input activation data
             y_true: True class labels
             cluster_labels: Cluster assignments at threshold
-            method: 'pca', 'tsne', or 'mds'
+            method: 'pca', 'mds', 'tsne', 'umap', or 'phate'
             threshold: Distance threshold value
             title_prefix: Prefix for plot title
             save_path: Path to save the plot
@@ -732,9 +731,14 @@ class BlobVisualizer:
         title: Optional[str] = None,
         metric: str = "euclidean",
         class_names: Optional[dict] = None,
+        method: str = "pca",
     ) -> plt.Figure:
         """
-        Create PCA plot with points colored by true labels and convex hulls for clusters at threshold.
+        Create a 2D projection plot with points colored by true labels and convex
+        hulls for clusters at threshold.
+
+        Clustering always happens in the original feature space; ``method`` only
+        controls the 2D canvas the hulls are drawn on.
 
         Args:
             points: Input data points (n_samples, n_features)
@@ -743,6 +747,9 @@ class BlobVisualizer:
             save_path: Optional path to save the plot
             title: Optional title for the plot
             metric: Distance metric for clustering ('euclidean', 'cosine', etc.)
+            class_names: Optional map label -> display name
+            method: Projection for the 2D view: 'pca' (default), 'mds', 'tsne',
+                'umap', or 'phate' (PHATE recommended for NN latent spaces)
 
         Returns:
             matplotlib Figure object
@@ -750,11 +757,19 @@ class BlobVisualizer:
         from matplotlib.patches import Polygon
         from scipy.spatial import ConvexHull
         from sklearn.cluster import AgglomerativeClustering
-        from sklearn.decomposition import PCA
 
-        # Apply PCA for 2D visualization
-        pca = PCA(n_components=2, random_state=DEFAULT_RANDOM_STATE)
-        points_2d = pca.fit_transform(points)
+        from ..projections import project, METHODS
+
+        if method.lower() not in METHODS:
+            raise ValueError(f"Unknown method: {method}. Use one of {METHODS}.")
+
+        # Project to 2D via the shared projections module.
+        reduced = project(
+            points, method=method, n_components=2,
+            random_state=DEFAULT_RANDOM_STATE,
+        )
+        points_2d = np.asarray(reduced)
+        method_name = method.upper()
 
         # Get cluster assignments at threshold
         if metric == "mahalanobis":
@@ -896,17 +911,19 @@ class BlobVisualizer:
                     label=f'{class_names[class_id]} (outlier)' if class_names and class_id in class_names else f'Class {class_id} Outliers'
                 )
 
-        # Set labels and title - BIGGER fonts for paper
-        ax.set_xlabel(
-            f"PC1 ({pca.explained_variance_ratio_[0]:.1%} variance)", fontsize=14
-        )
-        ax.set_ylabel(
-            f"PC2 ({pca.explained_variance_ratio_[1]:.1%} variance)", fontsize=14
-        )
+        # Set labels and title - BIGGER fonts for paper. PCA gets informative
+        # variance-labelled axes; other methods get generic component labels.
+        if method.lower() == "pca" and getattr(reduced, "reducer", None) is not None:
+            evr = reduced.reducer.explained_variance_ratio_
+            ax.set_xlabel(f"PC1 ({evr[0]:.1%} variance)", fontsize=14)
+            ax.set_ylabel(f"PC2 ({evr[1]:.1%} variance)", fontsize=14)
+        else:
+            ax.set_xlabel(f"{method_name} 1", fontsize=14)
+            ax.set_ylabel(f"{method_name} 2", fontsize=14)
 
         if title is None:
             n_outliers = np.sum(outlier_mask)
-            title = f"HOLE Blob Visualization: PCA + Contours + Outliers (Threshold: {threshold:.3f})"
+            title = f"HOLE Blob Visualization: {method_name} + Contours + Outliers (Threshold: {threshold:.3f})"
         ax.set_title(title, fontsize=16, fontweight="bold", pad=20)
 
         # Clean aesthetics - remove ticks and grids

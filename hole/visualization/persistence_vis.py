@@ -12,8 +12,6 @@ import matplotlib.patches as mpatches
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
-from sklearn.decomposition import PCA
-from sklearn.manifold import MDS, TSNE
 
 
 def plot_persistence_barcode(
@@ -236,6 +234,8 @@ def plot_dimensionality_reduction(
     alpha: float = 0.7,
     show_legend: bool = True,
     class_names: Optional[dict] = None,
+    metric: str = "euclidean",
+    precomputed: Union[bool, str] = "auto",
     **kwargs,
 ) -> plt.Axes:
     """
@@ -265,6 +265,13 @@ def plot_dimensionality_reduction(
         Alpha transparency for points
     show_legend : bool, optional
         Whether to show legend
+    metric : str, optional
+        Distance metric used when projecting a feature matrix ('euclidean',
+        'cosine', ...). Ignored when ``data`` is a distance matrix.
+    precomputed : bool or "auto", optional
+        Whether ``data`` is a precomputed distance matrix. "auto" falls back
+        to the square/symmetric/zero-diagonal heuristic in
+        :func:`hole.projections.project`; pass True explicitly when you know.
     **kwargs : dict
         Additional plotting arguments
 
@@ -282,7 +289,9 @@ def plot_dimensionality_reduction(
         coords_2d = np.column_stack(data)
     else:
         # Need dimensionality reduction
-        coords_2d = _perform_dimensionality_reduction(data, method)
+        coords_2d = _perform_dimensionality_reduction(
+            data, method, metric=metric, precomputed=precomputed
+        )
 
     # Generate colors based on labels
     if labels is not None:
@@ -365,7 +374,7 @@ def plot_dimensionality_reduction(
 
 def _perform_dimensionality_reduction(
     data: np.ndarray, method: str = "pca", n_components: int = 2, random_state: int = 42,
-    metric: str = "euclidean", **kwargs,
+    metric: str = "euclidean", precomputed: Union[bool, str] = "auto", **kwargs,
 ) -> np.ndarray:
     """
     Perform dimensionality reduction on data.
@@ -405,15 +414,17 @@ def _perform_dimensionality_reduction(
         raise ValueError(
             f"Unknown method: {method}. Use one of {METHODS}."
         )
-    # `project` auto-detects a precomputed distance matrix (square + symmetric +
-    # zero diagonal), matching the previous behaviour, and picks the right mode
-    # per method (e.g. MDS for PCA-on-distances, precomputed metrics elsewhere).
+    # With precomputed="auto", `project` detects a distance matrix (square +
+    # symmetric + zero diagonal); callers that *know* (e.g. HOLEVisualizer built
+    # from a distance matrix) pass precomputed=True so a slightly asymmetric or
+    # nonzero-diagonal matrix is never silently treated as a feature matrix.
     return np.asarray(
         project(
             data,
             method=method,
             n_components=n_components,
             metric=metric,
+            precomputed=precomputed,
             random_state=random_state,
             **kwargs,
         )
